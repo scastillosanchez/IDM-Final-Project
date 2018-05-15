@@ -1,0 +1,581 @@
+---
+title: 'Weesnaw:  Diagnosing Autism'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    theme: united
+    toc: yes
+  html_document:
+    df_print: paged
+    header-includes: \usepackage{color}
+    toc: yes
+---
+
+# 1.0 Report Background
+
+This report was prepared by your company name.
+Consultants:
+
+   + Sebastian Castillo-Sanchez
+   + Madison Chamberlain
+   + Ramin Chowdhury
+   + Tenzin Tashi
+
+```{r}
+# Set to True to Show R code.  Set to False to supress R codes
+show<-TRUE
+```
+```{r include=FALSE}
+# These will install required packages if they are not already installed
+if (!require("ggplot2")) {
+   install.packages("ggplot2", dependencies = TRUE)
+   library(ggplot2)
+}
+
+if (!require("knitr")) {
+   install.packages("knitr", dependencies = TRUE)
+   library(knitr)
+}
+if (!require("xtable")) {
+   install.packages("xtable", dependencies = TRUE)
+   library(xtable)
+}
+if (!require("pander")) {
+   install.packages("pander", dependencies = TRUE)
+   library(pander)
+}
+if (!require("ggbiplot")) {
+  install.packages("devtools",dependencies = TRUE )  # also need install ggplot2
+  library("devtools")
+  install_git("git://github.com/vqv/ggbiplot.git",dependencies = TRUE)
+  library("ggbiplot")
+}
+if (!require(reshape2)){
+  install.packages("reshape2", dependencies = TRUE)
+   library(reshape2)
+}
+if (!require(gridExtra)){
+  install.packages("gridExtra", dependencies = TRUE)
+   library(gridExtra)
+}
+if (!require(MASS)){
+  install.packages("MASS", dependencies = TRUE)
+   library(MASS)
+}
+if (!require("ggbiplot")) {
+  install.packages("devtools")  # also need install ggplot2
+  library("devtools")
+  install_git("git://github.com/vqv/ggbiplot.git")
+  library("ggbiplot")
+}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+
+
+# extra libraries and functions utilized by Weesnaw
+histopair <-function(pminus,pplus,thresh,yy=c(0,60),label2="Plus",label1="Minus", bwid) {
+  require(ggplot2); require(gridExtra)
+  hist1 <- ggplot(as.data.frame(pminus), aes(pminus)) +
+           geom_histogram(col="blue",fill="blue", binwidth=bwid) +
+           ggtitle('Scalar Projections')
+  hist2 <- ggplot(as.data.frame(pplus),  aes(pplus))  +
+           geom_histogram(col="red",fill="red", binwidth=bwid)
+  df <- data.frame(x1=c(thresh,thresh),y1=c(yy[1],yy[2]))
+  pmin <- min(pminus,pplus)
+  pmax<- max(pminus,pplus)
+  me1 <- hist1 + expand_limits(x=c(pmin,pmax)) +
+         geom_line(data=df,aes(x=x1,y=y1)) + xlab(label1)
+  me2 <- hist2 + expand_limits(x=c(pmin,pmax)) +
+         geom_line(data=df,aes(x=x1,y=y1)) + xlab(label2)
+  pl <- vector("list",2)
+  pl[[1]] <- me1;  pl[[2]]<-me2;
+  grid.arrange(grobs=pl,ncols=1)
+}
+
+install.packages("e1071")
+library(e1071)
+
+install.packages("caret", dependencies = TRUE)
+library(caret)
+```
+# 2.0 Introduction
+Our firm "Weesnaw" was hired as consultants analyze the results of Dr. Hanh, and develop a computational model that analyzes and generates the prediction of Autism Spectrum Disorder (ASD) with biomakrers. We were given a data set of with biomaker data and 67 samples that have ASD. The training data given to us includes a last column determines whether or not sample has ASD or not (has NEU - are neurotypical). Finally, our main task will be to predict which model is best used to classify these points: the Fisher Linear Discriminant Analysis (LDA) Method, or some other method, and with which features.
+
+
+# 3.0 Data Description
+```{r}
+Train.df <- read.csv('~/MATP-4400/data/autism_oxstress2.csv')
+Train.df$Group<- factor(Train.df$Group,levels=c('NEU','ASD'))
+Test.df<- read.csv('~/MATP-4400/data/autism_oxstress_val2.csv')
+Test.df$Group <- factor(Test.df$Group,levels=c('NEU','ASD'))
+# ^^ set group labels manually to ensure the underlying factor codes 'NEU' as 0 and 'ASD' as 1.
+# This ensures that probabilities close to 1 indicate high likelihood of autisim and probabilities close to zero indicate low probability of autism
+Train.matrix<-as.matrix(Train.df[,-1])
+Test.matrix <- as.matrix(Test.df[,-1])
+
+sc_tr <- scale(Train.matrix) # scale tr
+means <- attr(sc_tr, 'scaled:center') # get the mean of the columns
+stdevs <- attr(sc_tr, 'scaled:scale') # get the std of the columns
+sc_tst <- scale(Test.matrix, center=means, scale=stdevs)#scale tst using the means and std of tr
+count_pos <- sum(Train.df$Group == 'ASD')
+count_neg <- sum(Train.df$Group == 'NEU')
+count_neg
+count_pos
+
+my_pca <- prcomp(sc_tr,retx=TRUE,center=FALSE, scale=FALSE)
+heatmap(my_pca$rotation, main = 'Heatmap of features by PC', cexRow = 0.75, cexCol = 0.75 )
+
+#my_pca <- prcomp(Train.matrix,retx=TRUE,center=FALSE, scale=FALSE)
+#heatmap(my_pca$rotation, main = 'Heatmap of mean of each class', cexRow = 0.75, cexCol = 0.75 )
+
+boxplot(sc_tr, data=count_pos, main="Distribution of data in pos class")
+boxplot(sc_tr, data=count_neg, main="Distibution of data in neg class")
+
+
+
+```
+
+
+# 4.0 Feature Importance using Univariate Logistic Regression
+```{r}
+# Run logistic regression on variable with name i and store result in matrix res
+# Set up res Matrix to hold results
+res <- matrix(NA,nrow=ncol(Train.matrix),ncol=4)
+rownames(res) <- colnames(Train.matrix)
+colnames(res) <- c("Estimate","Std. Error","z value","Pr(>|z|)")
+
+for(j in 1:ncol(Train.matrix)){
+  i<-colnames(Train.matrix)[j]
+  # Run logistic regression
+  mymod <- glm(Group ~ Train.df[ ,i], data = Train.df,  family=binomial())
+  res[i,] <- coef(summary(mymod))[2,]
+  summary(mymod)
+}
+#res                                commented bc printing res at the end below
+
+resPos <- matrix(NA, nrow=0, ncol=4)
+resNeg <- matrix(NA, nrow=0, ncol=4)
+BestFeatures <- matrix(NA, nrow=0, ncol=4)
+
+colnames(resPos) <- c("Estimate","Std. Error","z value","Pr(>|z|)")
+colnames(resNeg) <- c("Estimate","Std. Error","z value","Pr(>|z|)")
+colnames(BestFeatures) <- c("Estimate","Std. Error","z value","Pr(>|z|)")
+
+posRowNames <- character(length = 0)
+negRowNames <- character(length = 0)
+BFRowNames <- character(length = 0)
+
+for(k in 1:nrow(res)){
+  if(res[k,1]>0){
+    posLine <- matrix(res[k,], ncol=4)
+    resPos <- rbind(resPos,posLine)
+    posRowNames <- c(posRowNames,rownames(res)[k])
+  }
+  if(res[k,1]<=0){
+    negLine <- matrix(res[k,], ncol=4)
+    resNeg <- rbind(resNeg,negLine)
+    negRowNames <- c(negRowNames,rownames(res)[k])
+  }
+  if(res[k,4]<=0.002){
+    BFLine <- matrix(res[k,], ncol=4)
+    BestFeatures <- rbind(BestFeatures,BFLine)
+    BFRowNames <- c(BFRowNames,rownames(res)[k])
+  }
+}
+
+rownames(resPos) <- posRowNames
+#resPos                                commented bc printing resPos at the end below
+
+rownames(resNeg) <- negRowNames
+#resNeg                                commented bc printing resNeg at the end below
+
+rownames(BestFeatures) <- BFRowNames
+#BestFeatures                            commented bc printing resNeg at the end below
+
+
+# printing all 3 so far
+res
+resPos
+resNeg
+BestFeatures
+
+
+
+```
+
+# 5.0  PCA Analysis
+```{r}
+
+trainBF <- sc_tr[,rownames(BestFeatures)]
+
+# trainBF <- matrix(NA, nrow=nrow(sc_tr), ncol=0)
+# trBFcol <- character(length = 0)
+#
+# for(i in 1:nrow(BestFeatures)){
+#   for(j in 1:ncol(sc_tr)){
+#     if(rownames(BestFeatures)[i] == colnames(sc_tr)[j]){
+#       trainBF <- cbind(trainBF, sc_tr[,j])
+#       trBFcol <- c(trBFcol, colnames(sc_tr)[j])
+#     }
+#   }
+# }
+# colnames(trainBF) <- trBFcol
+#trainBF
+
+
+set.seed(300)
+my.pca <- prcomp(trainBF, retx = TRUE, center = FALSE, scale = FALSE)
+
+screeplot(my.pca, type="lines", main = "Screeplot of PCA")
+#km <- kmeans(trainBF, 4)
+
+#Creating biplot
+p <- ggbiplot(my.pca,
+              choices=c(1,2),
+              alpha=.2,
+              varname.adjust=3,
+              labels=rownames(trainBF),
+              groups=Train.df$Group,
+              ellipse=2)
+p + ggtitle('BestFeatures biplot of PC1 and PC2') +  coord_cartesian(xlim=c(-2.5,2.5), ylim=c(-2.5,2.5))
+
+```
+
+# 6.0 LDA Model
+```{r}
+
+papervar <-cbind("X..DNA.methylation","X8.OHG","Glu..Cys.","fCystine.fCysteine","X..oxidized","Chlorotyrosine","tGSH.GSSG")
+
+paperdf <- Train.df[,papervar]
+papermatrix <- as.matrix(paperdf)
+
+lda.fit <- lda(Group ~ ., cbind(paperdf,Train.df["Group"]), prior=c(1,1)/2)
+
+#Calculate the LDA threshold from the means and the normal vector.
+thresh <- ((lda.fit$means[1,] +lda.fit$means[2,])/2)%*%lda.fit$scaling
+
+#Compute the scalar projections of each class on the separating hyperplane.
+projtrain1 <- papermatrix%*%as.matrix(lda.fit$scaling)
+pplustrain1  <- projtrain1[Train.df$Group[ ]=='ASD'] #All the class 1 projections
+pminustrain1 <- projtrain1[Train.df$Group[ ]=='NEU'] #All the class -1 projections
+
+#% correctly classified as ASD
+sum(pplustrain1>thresh[1])/length(pplustrain1)
+#% correctly classified as NEU
+sum(pminustrain1<thresh[1])/length(pminustrain1)
+
+histopair(pminustrain1,pplustrain1,yy=c(0,20),thresh,label1="ASD",label2="NEU", bwid=0.3)
+
+#Compute the scalar projections of each class on the separating hyperplane for the testing data.
+papertest <- as.matrix(Test.df[,papervar])
+projtest1 <- papertest%*%as.matrix(lda.fit$scaling)
+pplustest1  <- projtest1[Test.df$Group[ ]=='ASD'] #All the class 1 projections
+pminustest1 <- projtest1[Test.df$Group[ ]=='NEU'] #All the class -1 projections
+
+#% correctly classified as ASD
+sum(pplustest1>thresh[1])/length(pplustest1)
+#% correctly classified as NEU
+sum(pminustest1<thresh[1])/length(pminustest1)
+
+histopair(pminustest1,pplustest1,yy=c(0,20),thresh,label1="ASD",label2="NEU", bwid=0.3)
+
+#LOO analysis
+ypredict <- c(1:nrow(paperdf))
+
+for (i in 1:nrow(paperdf)){
+  paperdfloo <- paperdf[-i,]
+  paperloo.matrix <- as.matrix(paperdf)
+  loo <- paperloo.matrix[i,]
+  paperloo.matrix <- paperloo.matrix[-i,]
+  Trainloo.df <- Train.df[-i,]
+
+  ldaloo.fit <- lda(Group ~ ., cbind(paperdfloo,Trainloo.df["Group"]), prior=c(1,1)/2)
+  thresh <- ((ldaloo.fit$means[1,] +ldaloo.fit$means[2,])/2)%*%ldaloo.fit$scaling
+
+  sproj <- loo%*%as.matrix(ldaloo.fit$scaling)
+
+  if(sproj>thresh)
+    ypredict[i]='ASD'
+  else
+    ypredict[i]='NEU'
+}
+
+#show percentage of correctly classified ASD points
+correctpos = sum(Train.df[ypredict[]=='ASD',"Group"]=='ASD')
+correctpos/sum(Train.df[,"Group"]=='ASD')
+
+#show percentage of correctly classified ASD points
+correctneg = sum(Train.df[ypredict[]=='NEU',"Group"]=='NEU')
+correctneg/sum(Train.df[,"Group"]=='NEU')
+
+#show total percentage correct
+correct = sum(ypredict[]==Train.df["Group"])
+correct/length(ypredict)
+
+```
+
+# 7.0 Investigation of Alternative Models
+```{r}
+# Run multiple logistic regression on data in data frame Train.df
+# Using only variables in papervars.  Note this is LR model for unscaled data.  This shouldn't be one of your 4 models.
+# You need to do the one for scaled data.
+papervar <-c("X..DNA.methylation","X8.OHG","Glu..Cys.",
+             "fCystine.fCysteine","X..oxidized","Chlorotyrosine","tGSH.GSSG")
+fulldat <- cbind.data.frame(Group=Train.df$Group, Train.matrix[ ,papervar])
+mymod <- glm(Group~.,data=fulldat,family=binomial())
+# Predict all the data in Train.df
+result <- predict(mymod,data=fulldat, type='response')
+trainpred<-matrix(NA,nrow=length(result),ncol=1)
+thresh<- 0.5
+trainpred[result<=thresh] <- 'NEU'
+trainpred[result>thresh] <- 'ASD'
+# This commands make group names are in correct order
+trainpred<- factor(trainpred,levels=c('NEU','ASD'))
+trainactual<-Train.df$Group
+table(trainactual,trainpred)
+summary(mymod)
+
+datacomb<- cbind.data.frame(Group = Train.df$Group, Train.matrix[,papervar])
+multmod<- glm(Group~.,data = datacomb, family = binomial())
+#prediction of data in Train.df
+pred<- predict(multmod, data = datacomb, type = 'response')
+trainpred <- matrix(NA, nrow = length(pred), ncol= 1)
+t <- 0.5
+trainpred[pred<= t] <- 'NEU'
+trainpred[pred>t] <- 'ASD'
+#Making group names in the correct order
+trainpred <- factor(trainpred, levels = c('NEU', 'ASD'))
+correctrain <- Train.df$Group
+table(correctrain, trainpred)
+summary(multmod)
+
+
+#SVM (weesnaw!!!!)
+papervar <-cbind("X..DNA.methylation","X8.OHG","Glu..Cys.","fCystine.fCysteine","X..oxidized","Chlorotyrosine","tGSH.GSSG")
+
+paperdf <- Train.df[,papervar]
+papermatrix <- as.matrix(paperdf)
+
+svm.fit <- svm(Group ~ ., cbind(paperdf,Train.df["Group"]), prior=c(1,1)/2)
+
+trainpredict <- as.matrix(predict(svm.fit,as.matrix(Train.df[,papervar])))
+testpredict <- as.matrix(predict(svm.fit,as.matrix(Test.df[,papervar])))
+
+#show percentage of correctly classified ASD training points
+correctpos2 = sum(Train.df[trainpredict[]=='ASD',"Group"]=='ASD')
+correctpos2/sum(trainpredict[]=='ASD')
+
+#show percentage of correctly classified NEU training points
+correctneg2 = sum(Train.df[trainpredict[]=='NEU',"Group"]=='NEU')
+correctneg2/sum(trainpredict[]=='NEU')
+
+#percentage correct on all training data
+sum(trainpredict==Train.df["Group"])/length(trainpredict)
+
+
+#show percentage of correctly classified ASD training points
+correctpos3 = sum(Test.df[testpredict[]=='ASD',"Group"]=='ASD')
+correctpos3/sum(testpredict[]=='ASD')
+
+#show percentage of correctly classified NEU training points
+correctneg3 = sum(Test.df[testpredict[]=='NEU',"Group"]=='NEU')
+correctneg3/sum(testpredict[]=='NEU')
+
+#percentage correct on all testing data
+sum(testpredict==Test.df["Group"])/length(testpredict)
+
+
+#yeah that plsda
+papervar <-cbind("X..DNA.methylation","X8.OHG","Glu..Cys.","fCystine.fCysteine","X..oxidized","Chlorotyrosine","tGSH.GSSG")
+
+paperdf <- Train.df[,papervar]
+papermatrix <- as.matrix(paperdf)
+
+plsda.fit <- plsda(papermatrix, as.factor(Train.df[,"Group"]), probMethod = "Bayes")
+
+trainpredict3 <- as.matrix(predict(plsda.fit, papermatrix))
+testpredict3 <- as.matrix(predict(plsda.fit, as.matrix(Test.df[,papervar])))
+
+#show percentage of correctly classified ASD training points
+correctpos5 = sum(Train.df[trainpredict3[]=='ASD',"Group"]=='ASD')
+correctpos5/sum(trainpredict3[]=='ASD')
+
+#show percentage of correctly classified NEU training points
+correctneg5 = sum(Train.df[trainpredict3[]=='NEU',"Group"]=='NEU')
+correctneg5/sum(trainpredict3[]=='NEU')
+
+#percentage correct on all training data
+sum(trainpredict3==Train.df["Group"])/length(trainpredict3)
+
+
+#show percentage of correctly classified ASD training points
+correctpos6 = sum(Test.df[testpredict3[]=='ASD',"Group"]=='ASD')
+correctpos6/sum(testpredict3[]=='ASD')
+
+#show percentage of correctly classified NEU training points
+correctneg6 = sum(Test.df[testpredict3[]=='NEU',"Group"]=='NEU')
+correctneg6/sum(testpredict3[]=='NEU')
+
+#percentage correct on all testing data
+sum(testpredict3==Test.df["Group"])/length(testpredict3)
+
+confusionMatrix(trainpredict3,as.factor(Train.df[,"Group"]))
+confusionMatrix(testpredict3,as.factor(Test.df[,"Group"]))
+
+
+
+```
+
+# 8.0 Feature Challenge
+```{r}
+#using the univariate logistic regression in part 4, find the next 7 best features
+nonpaperbest<-BestFeatures[setdiff(rownames(BestFeatures), papervar),]
+sorted <- nonpaperbest[,order('Pr(>|z|)')]
+sorted[1:7]
+
+npapervar <- cbind("Methion.","SAM","SAH","SAM.SAH","Adenosine","Cysteine","tGSH")
+
+#do svm on this
+npaperdf <- Train.df[,npapervar]
+npapermatrix <- as.matrix(npaperdf)
+
+svm.fit2 <- svm(Group ~ ., cbind(npaperdf,Train.df["Group"]), prior=c(1,1)/2)
+
+trainpredict2 <- as.matrix(predict(svm.fit2,as.matrix(Train.df[,npapervar])))
+testpredict2 <- as.matrix(predict(svm.fit2,as.matrix(Test.df[,npapervar])))
+
+#show percentage of correctly classified ASD training points
+correctpos3 = sum(Train.df[trainpredict2[]=='ASD',"Group"]=='ASD')
+correctpos3/sum(trainpredict2[]=='ASD')
+
+#show percentage of correctly classified NEU training points
+correctneg3 = sum(Train.df[trainpredict2[]=='NEU',"Group"]=='NEU')
+correctneg3/sum(trainpredict2[]=='NEU')
+
+#percentage correct on all training data
+sum(trainpredict2==Train.df["Group"])/length(trainpredict2)
+
+
+#show percentage of correctly classified ASD training points
+correctpos4 = sum(Test.df[testpredict2[]=='ASD',"Group"]=='ASD')
+correctpos4/sum(testpredict2[]=='ASD')
+
+#show percentage of correctly classified NEU training points
+correctneg4 = sum(Test.df[testpredict2[]=='NEU',"Group"]=='NEU')
+correctneg4/sum(testpredict2[]=='NEU')
+
+#percentage correct on all testing data
+sum(testpredict2==Test.df["Group"])/length(testpredict2)
+
+
+```
+# 9.0  Additional Analysis and Visualizations
+
+Each group member should do  additional analyses or visualization using one or more R commands not covered in class.   Indicate the R commands you used. Do the analysis. Discuss the results
+
+## 9.1 Additional Results from Tenzin
+```{r}
+# In attempts to see what differences there exist between
+# the features that Dr. Hahn selected, and we(esnaw) selected
+# I have plotted boxplots of both sets of features, scaled
+# and unscaled.
+# As expected, the boxplots show relatively similar trends
+# which makes sense as the models using the two sets were
+# still relativly similar in accuracy
+# However, Dr. Hahn's paper features seem to have more
+# consistency:
+# in the unscaled plots, there is less variation in the
+# range of values, and in the scaled plots, there are
+# fewer outliers, especially below the first quartile
+
+boxplot(fulldat, main="Paper Selected Features")
+boxplot(npaperdf, main="Weesnaw Selected Features")
+
+sc_fulldat <- scale(fulldat[,-1])
+sc_npaperdf <- scale(npaperdf)
+
+boxplot(sc_fulldat, main="Scaled Paper Selected Features")
+boxplot(sc_npaperdf, main="Scaled Weesnaw Selected Features")
+```
+## 9.2 Additional Results from Ramin
+```{r}
+# Here we can see how when we plot the 7
+# paper variables against each other most
+# of them appear to be very separable
+
+featurePlot(x=paperdf, y=Train.df[,"Group"], plot="pairs")
+```
+## 9.3 Additional Results from Madison
+```{r}
+# Between principle components 1&2 we can see
+# that the classfication between patients
+# classified as "NEU" and patients classified
+# as "ASD" is well separated. Meaning there is
+# a clear distinction between what variables
+# describe the classification. However, we can
+# see between principles 2&3 and 3&4, since the
+# two classifications ovelap, it's hard to distinguish
+# which variables are important for classification of NEU and ASD
+
+my.pca <- prcomp(trainBF, retx = TRUE, center = FALSE, scale = FALSE)
+screeplot(my.pca, type="lines", main = "Whatever")
+#km <- kmeans(trainBF, 4)
+#Creating biplot
+p <- ggbiplot(my.pca,
+          	choices=c(1,2),
+          	alpha=.2,
+          	varname.adjust=3,
+          	labels=rownames(trainBF),
+          	groups=Train.df$Group,
+          	ellipse=2)
+p + ggtitle('BestFeatures biplot of PC1 and PC2') +  coord_cartesian(xlim=c(-2.5,2.5), ylim=c(-2.5,2.5))
+# ^^ convenient function for cbinding and then making the result a data frame
+p1 <- ggbiplot(my.pca,
+          	choices=c(2,3),
+          	alpha=.2,
+          	varname.adjust=3,
+          	labels=rownames(trainBF),
+          	groups=Train.df$Group,
+          	ellipse=2)
+p1 + ggtitle('BestFeatures biplot of PC1 and PC2') +  coord_cartesian(xlim=c(-2.5,2.5), ylim=c(-2.5,2.5))
+p2 <- ggbiplot(my.pca,
+          	choices=c(3,4),
+          	alpha=.2,
+          	varname.adjust=3,
+          	labels=rownames(trainBF),
+          	groups=Train.df$Group,
+          	ellipse=2)
+p2 + ggtitle('BestFeatures biplot of PC1 and PC2') +  coord_cartesian(xlim=c(-2.5,2.5), ylim=c(-2.5,2.5))
+```
+## 9.4 Additional Results from Sebastian
+```{r}
+# The upper panel shows the shading to show correlation between the Best Features
+# The lower panel shows the different points of the Best Features
+# The diagonal panel shows the min and max of the Beat Features
+
+# The results show that Tyrosine is the closest
+# Best Feature related to Tryptophane as shown through
+# the darker colors (blue). The points on the other hand,
+# show the different points relating to the different features.
+
+
+install.packages("corrgram", dependencies = TRUE)
+library(corrgram)
+#Installed package "corrgram" and created a Correleogram of the Best Features matrix
+corrgram(trainBF, order = NULL, lower.panel=panel.pts, text.panel = panel.txt,
+         upper.panel = panel.shade, diag.panel = panel.minmax,
+         main = "Correleogram of Best Features")
+
+```
+# 10.0 Final Predictive Model
+Weesnaw supports the usage of both the Fisher LDA Model, and the SVM model for this investigation. Both are recommended  because of slightly varied results in our analysis, this may work itself out with further testing. The variation was in that while the SVM model proved more accurate on the training set, the LDA model was more accurate on the testing set. Both results are desired as having an accurate model for training can lead to accurate testing identification, and having accurate testing identification is the goal of using such models.
+
+# 11.0 Conclusion
+In the end, Weesnaw has come to the conclusion that in this first round of analysis, that Dr. Hahn has indeed picked out more relevant features than Weesnaw has. This result is not unexpected, but there is always the possibility to improve.
+
+
+
+
+
